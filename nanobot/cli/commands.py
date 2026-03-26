@@ -1,12 +1,11 @@
 """CLI commands for nanobot."""
 
 import asyncio
-from contextlib import contextmanager, nullcontext
-
 import os
 import select
 import signal
 import sys
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +32,22 @@ from rich.table import Table
 from rich.text import Text
 
 from nanobot import __logo__, __version__
+from nanobot.cli.bot_commands import create_bots_app
+from nanobot.cli.runtime_support import (
+    load_runtime_config as _runtime_load_runtime_config,
+)
+from nanobot.cli.runtime_support import (
+    make_provider as _runtime_make_provider,
+)
+from nanobot.cli.runtime_support import (
+    run_agent_once as _runtime_run_agent_once,
+)
+from nanobot.cli.runtime_support import (
+    run_bots_for_message_with as _runtime_run_bots_for_message_with,
+)
+from nanobot.cli.runtime_support import (
+    synthesize_bot_results as _runtime_synthesize_bot_results,
+)
 from nanobot.config.paths import get_workspace_path
 from nanobot.config.schema import Config
 from nanobot.utils.helpers import sync_workspace_templates
@@ -154,6 +169,105 @@ def _response_renderable(content: str, render_markdown: bool, metadata: dict | N
     if (metadata or {}).get("render_as") == "text":
         return Text(content)
     return Markdown(content)
+
+
+def _make_provider(config: Config):
+    """Compatibility wrapper around shared CLI runtime provider creation."""
+    return _runtime_make_provider(config, console)
+
+
+def _load_runtime_config(
+    config: str | None = None,
+    workspace: str | None = None,
+    *,
+    announce: bool = True,
+) -> Config:
+    """Compatibility wrapper around shared CLI runtime config loading."""
+    return _runtime_load_runtime_config(
+        console,
+        config=config,
+        workspace=workspace,
+        announce=announce,
+    )
+
+
+async def _run_agent_once(
+    config: Config,
+    message: str,
+    session_id: str,
+    *,
+    logs: bool = False,
+):
+    """Compatibility wrapper around shared CLI one-shot execution."""
+    return await _runtime_run_agent_once(
+        config,
+        message,
+        session_id,
+        logs=logs,
+    )
+
+
+async def _run_bots_for_message(
+    bots: list[dict[str, Any]],
+    *,
+    message: str,
+    session_prefix: str,
+    logs: bool = False,
+    timeout_s: float | None = None,
+    max_concurrency: int | None = None,
+    retries: int = 0,
+) -> list[dict[str, Any]]:
+    """Execute the same message across multiple registered bots."""
+    return await _runtime_run_bots_for_message_with(
+        bots,
+        message=message,
+        session_prefix=session_prefix,
+        load_runtime_config_fn=_load_runtime_config,
+        run_agent_once_fn=_run_agent_once,
+        logs=logs,
+        timeout_s=timeout_s,
+        max_concurrency=max_concurrency,
+        retries=retries,
+    )
+
+
+async def _synthesize_bot_results(
+    config: Config,
+    user_message: str,
+    results: list[dict[str, Any]],
+) -> str:
+    """Compatibility wrapper around shared CLI synthesis."""
+    return await _runtime_synthesize_bot_results(config, user_message, results)
+
+
+def _bots_cli_load_runtime_config(*args, **kwargs):
+    """Late-bind runtime config loading so tests can patch command helpers."""
+    return _load_runtime_config(*args, **kwargs)
+
+
+async def _bots_cli_run_agent_once(*args, **kwargs):
+    """Late-bind one-shot agent execution so tests can patch command helpers."""
+    return await _run_agent_once(*args, **kwargs)
+
+
+async def _bots_cli_run_bots_for_message(*args, **kwargs):
+    """Late-bind multi-bot execution so tests can patch command helpers."""
+    return await _run_bots_for_message(*args, **kwargs)
+
+
+async def _bots_cli_synthesize_bot_results(*args, **kwargs):
+    """Late-bind synthesis so tests can patch command helpers."""
+    return await _synthesize_bot_results(*args, **kwargs)
+
+
+def _bots_cli_response_renderable(*args, **kwargs):
+    """Late-bind response rendering helper for extracted bot CLI commands."""
+    return _response_renderable(*args, **kwargs)
+
+
+def _bots_cli_print_agent_response(*args, **kwargs):
+    """Late-bind assistant response printing for extracted bot CLI commands."""
+    return _print_agent_response(*args, **kwargs)
 
 
 async def _print_interactive_line(text: str) -> None:
@@ -407,100 +521,6 @@ def _onboard_plugins(config_path: Path) -> None:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def _make_provider(config: Config):
-    """Create the appropriate LLM provider from config."""
-    from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
-    from nanobot.providers.base import GenerationSettings
-    from nanobot.providers.openai_codex_provider import OpenAICodexProvider
-
-    model = config.agents.defaults.model
-    provider_name = config.get_provider_name(model)
-    p = config.get_provider(model)
-
-    # OpenAI Codex (OAuth)
-    if provider_name == "openai_codex" or model.startswith("openai-codex/"):
-        provider = OpenAICodexProvider(default_model=model)
-    # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
-    elif provider_name == "custom":
-        from nanobot.providers.custom_provider import CustomProvider
-        provider = CustomProvider(
-            api_key=p.api_key if p else "no-key",
-            api_base=config.get_api_base(model) or "http://localhost:8000/v1",
-            default_model=model,
-            extra_headers=p.extra_headers if p else None,
-        )
-    # Azure OpenAI: direct Azure OpenAI endpoint with deployment name
-    elif provider_name == "azure_openai":
-        if not p or not p.api_key or not p.api_base:
-            console.print("[red]Error: Azure OpenAI requires api_key and api_base.[/red]")
-            console.print("Set them in ~/.nanobot/config.json under providers.azure_openai section")
-            console.print("Use the model field to specify the deployment name.")
-            raise typer.Exit(1)
-        provider = AzureOpenAIProvider(
-            api_key=p.api_key,
-            api_base=p.api_base,
-            default_model=model,
-        )
-    else:
-        from nanobot.providers.litellm_provider import LiteLLMProvider
-        from nanobot.providers.registry import find_by_name
-        spec = find_by_name(provider_name)
-        if not model.startswith("bedrock/") and not (p and p.api_key) and not (spec and (spec.is_oauth or spec.is_local)):
-            console.print("[red]Error: No API key configured.[/red]")
-            console.print("Set one in ~/.nanobot/config.json under providers section")
-            raise typer.Exit(1)
-        provider = LiteLLMProvider(
-            api_key=p.api_key if p else None,
-            api_base=config.get_api_base(model),
-            default_model=model,
-            extra_headers=p.extra_headers if p else None,
-            provider_name=provider_name,
-        )
-
-    defaults = config.agents.defaults
-    provider.generation = GenerationSettings(
-        temperature=defaults.temperature,
-        max_tokens=defaults.max_tokens,
-        reasoning_effort=defaults.reasoning_effort,
-    )
-    return provider
-
-
-def _load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
-    """Load config and optionally override the active workspace."""
-    from nanobot.config.loader import load_config, set_config_path
-
-    config_path = None
-    if config:
-        config_path = Path(config).expanduser().resolve()
-        if not config_path.exists():
-            console.print(f"[red]Error: Config file not found: {config_path}[/red]")
-            raise typer.Exit(1)
-        set_config_path(config_path)
-        console.print(f"[dim]Using config: {config_path}[/dim]")
-
-    loaded = load_config(config_path)
-    _warn_deprecated_config_keys(config_path)
-    if workspace:
-        loaded.agents.defaults.workspace = workspace
-    return loaded
-
-
-def _warn_deprecated_config_keys(config_path: Path | None) -> None:
-    """Hint users to remove obsolete keys from their config file."""
-    import json
-    from nanobot.config.loader import get_config_path
-
-    path = config_path or get_config_path()
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return
-    if "memoryWindow" in raw.get("agents", {}).get("defaults", {}):
-        console.print(
-            "[dim]Hint: `memoryWindow` in your config is no longer used "
-            "and can be safely removed.[/dim]"
-        )
 
 
 
@@ -716,43 +736,12 @@ def agent(
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
 ):
     """Interact with the agent directly."""
-    from loguru import logger
-
-    from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
-    from nanobot.config.paths import get_cron_dir
-    from nanobot.cron.service import CronService
 
     config = _load_runtime_config(config, workspace)
     sync_workspace_templates(config.workspace_path)
 
     bus = MessageBus()
-    provider = _make_provider(config)
-
-    # Create cron service for tool usage (no callback needed for CLI unless running)
-    cron_store_path = get_cron_dir() / "jobs.json"
-    cron = CronService(cron_store_path)
-
-    if logs:
-        logger.enable("nanobot")
-    else:
-        logger.disable("nanobot")
-
-    agent_loop = AgentLoop(
-        bus=bus,
-        provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        context_window_tokens=config.agents.defaults.context_window_tokens,
-        web_search_config=config.tools.web.search,
-        web_proxy=config.tools.web.proxy or None,
-        exec_config=config.tools.exec,
-        cron_service=cron,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
-        mcp_servers=config.tools.mcp_servers,
-        channels_config=config.channels,
-    )
 
     # Shared reference for progress callbacks
     _thinking: _ThinkingSpinner | None = None
@@ -771,8 +760,11 @@ def agent(
             nonlocal _thinking
             _thinking = _ThinkingSpinner(enabled=not logs)
             with _thinking:
-                response = await agent_loop.process_direct(
-                    message, session_id, on_progress=_cli_progress,
+                response = await _run_agent_once(
+                    config,
+                    message,
+                    session_id,
+                    logs=logs,
                 )
             _thinking = None
             _print_agent_response(
@@ -780,11 +772,41 @@ def agent(
                 render_markdown=markdown,
                 metadata=response.metadata if response else None,
             )
-            await agent_loop.close_mcp()
 
         asyncio.run(run_once())
     else:
         # Interactive mode — route through bus like other channels
+        from loguru import logger
+
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.config.paths import get_cron_dir
+        from nanobot.cron.service import CronService
+
+        provider = _make_provider(config)
+        cron_store_path = get_cron_dir() / "jobs.json"
+        cron = CronService(cron_store_path)
+
+        if logs:
+            logger.enable("nanobot")
+        else:
+            logger.disable("nanobot")
+
+        agent_loop = AgentLoop(
+            bus=bus,
+            provider=provider,
+            workspace=config.workspace_path,
+            model=config.agents.defaults.model,
+            max_iterations=config.agents.defaults.max_tool_iterations,
+            context_window_tokens=config.agents.defaults.context_window_tokens,
+            web_search_config=config.tools.web.search,
+            web_proxy=config.tools.web.proxy or None,
+            exec_config=config.tools.exec,
+            cron_service=cron,
+            restrict_to_workspace=config.tools.restrict_to_workspace,
+            mcp_servers=config.tools.mcp_servers,
+            channels_config=config.channels,
+        )
+
         from nanobot.bus.events import InboundMessage
         _init_prompt_session()
         console.print(f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n")
@@ -1071,129 +1093,19 @@ def plugins_list():
     console.print(table)
 
 
-# ============================================================================
-# Status Commands
-# ============================================================================
 
-
-@app.command()
-def status():
-    """Show nanobot status."""
-    from nanobot.config.loader import get_config_path, load_config
-
-    config_path = get_config_path()
-    config = load_config()
-    workspace = config.workspace_path
-
-    console.print(f"{__logo__} nanobot Status\n")
-
-    console.print(f"Config: {config_path} {'[green]✓[/green]' if config_path.exists() else '[red]✗[/red]'}")
-    console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")
-
-    if config_path.exists():
-        from nanobot.providers.registry import PROVIDERS
-
-        console.print(f"Model: {config.agents.defaults.model}")
-
-        # Check API keys from registry
-        for spec in PROVIDERS:
-            p = getattr(config.providers, spec.name, None)
-            if p is None:
-                continue
-            if spec.is_oauth:
-                console.print(f"{spec.label}: [green]✓ (OAuth)[/green]")
-            elif spec.is_local:
-                # Local deployments show api_base instead of api_key
-                if p.api_base:
-                    console.print(f"{spec.label}: [green]✓ {p.api_base}[/green]")
-                else:
-                    console.print(f"{spec.label}: [dim]not set[/dim]")
-            else:
-                has_key = bool(p.api_key)
-                console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
-
-
-# ============================================================================
-# OAuth Login
-# ============================================================================
-
-provider_app = typer.Typer(help="Manage providers")
-app.add_typer(provider_app, name="provider")
-
-
-_LOGIN_HANDLERS: dict[str, callable] = {}
-
-
-def _register_login(name: str):
-    def decorator(fn):
-        _LOGIN_HANDLERS[name] = fn
-        return fn
-    return decorator
-
-
-@provider_app.command("login")
-def provider_login(
-    provider: str = typer.Argument(..., help="OAuth provider (e.g. 'openai-codex', 'github-copilot')"),
-):
-    """Authenticate with an OAuth provider."""
-    from nanobot.providers.registry import PROVIDERS
-
-    key = provider.replace("-", "_")
-    spec = next((s for s in PROVIDERS if s.name == key and s.is_oauth), None)
-    if not spec:
-        names = ", ".join(s.name.replace("_", "-") for s in PROVIDERS if s.is_oauth)
-        console.print(f"[red]Unknown OAuth provider: {provider}[/red]  Supported: {names}")
-        raise typer.Exit(1)
-
-    handler = _LOGIN_HANDLERS.get(spec.name)
-    if not handler:
-        console.print(f"[red]Login not implemented for {spec.label}[/red]")
-        raise typer.Exit(1)
-
-    console.print(f"{__logo__} OAuth Login - {spec.label}\n")
-    handler()
-
-
-@_register_login("openai_codex")
-def _login_openai_codex() -> None:
-    try:
-        from oauth_cli_kit import get_token, login_oauth_interactive
-        token = None
-        try:
-            token = get_token()
-        except Exception:
-            pass
-        if not (token and token.access):
-            console.print("[cyan]Starting interactive OAuth login...[/cyan]\n")
-            token = login_oauth_interactive(
-                print_fn=lambda s: console.print(s),
-                prompt_fn=lambda s: typer.prompt(s),
-            )
-        if not (token and token.access):
-            console.print("[red]✗ Authentication failed[/red]")
-            raise typer.Exit(1)
-        console.print(f"[green]✓ Authenticated with OpenAI Codex[/green]  [dim]{token.account_id}[/dim]")
-    except ImportError:
-        console.print("[red]oauth_cli_kit not installed. Run: pip install oauth-cli-kit[/red]")
-        raise typer.Exit(1)
-
-
-@_register_login("github_copilot")
-def _login_github_copilot() -> None:
-    import asyncio
-
-    console.print("[cyan]Starting GitHub Copilot device flow...[/cyan]\n")
-
-    async def _trigger():
-        from litellm import acompletion
-        await acompletion(model="github_copilot/gpt-4o", messages=[{"role": "user", "content": "hi"}], max_tokens=1)
-
-    try:
-        asyncio.run(_trigger())
-        console.print("[green]✓ Authenticated with GitHub Copilot[/green]")
-    except Exception as e:
-        console.print(f"[red]Authentication error: {e}[/red]")
-        raise typer.Exit(1)
+app.add_typer(
+    create_bots_app(
+        console=console,
+        load_runtime_config=_bots_cli_load_runtime_config,
+        run_agent_once=_bots_cli_run_agent_once,
+        run_bots_for_message=_bots_cli_run_bots_for_message,
+        synthesize_bot_results=_bots_cli_synthesize_bot_results,
+        response_renderable=_bots_cli_response_renderable,
+        print_agent_response=_bots_cli_print_agent_response,
+    ),
+    name="bots",
+)
 
 
 if __name__ == "__main__":

@@ -1325,6 +1325,61 @@ nanobot gateway --config ~/.nanobot-telegram/config.json --workspace /tmp/nanobo
 - `--workspace` overrides the workspace defined in the config file
 - Cron jobs and runtime media/state are derived from the config directory
 
+## 🤝 Bot Teams MVP
+
+nanobot now supports a lightweight **bot team** workflow built on isolated bot workspaces.
+Each bot gets its own generated config, workspace, memory files, and custom skills directory.
+
+Roadmap: see [`docs/BOT_TEAMS_ROADMAP.md`](docs/BOT_TEAMS_ROADMAP.md).
+
+### Create a specialist bot
+
+```bash
+nanobot bots create "Thread Marketing Bot" \
+  --role "Thread marketing specialist" \
+  --description "Plans and drafts social threads" \
+  --tag marketing --tag growth \
+  --skill github --skill summarize \
+  --custom-skill thread-writing --custom-skill analytics \
+  --memory-seed "- Brand voice: sharp but honest."
+```
+
+This creates:
+
+- a dedicated bot workspace under the active instance runtime directory
+- a dedicated config file for that bot
+- seeded `AGENTS.md`, `SOUL.md`, `USER.md`, and `memory/MEMORY.md`
+- stub custom skills only for `--custom-skill` entries, so bundled skills are not accidentally shadowed
+- by default, creation refuses to reuse a non-empty workspace unless you pass `--force`
+
+### Inspect your bot team
+
+```bash
+nanobot bots list
+nanobot bots show thread-marketing-bot
+nanobot bots dashboard
+```
+
+The generated dashboard is a static HTML file summarizing each bot's role, workspace, memory snapshot,
+custom skills, and session counts.
+
+### Run bots directly
+
+```bash
+nanobot bots run thread-marketing-bot -m "Draft three launch threads"
+nanobot bots compare thread-marketing-bot research-bot -m "Plan a product launch"
+nanobot bots dispatch --tag marketing -m "Draft launch messaging"
+nanobot bots orchestrate --bot research-bot --bot thread-marketing-bot -m "Plan a launch campaign"
+nanobot bots orchestrate --tag marketing -m "Write launch thread copy" --strategy best_match --max-bots 1
+nanobot bots orchestrate --tag marketing -m "Plan campaign variants" --policy strict
+nanobot bots orchestrate --tag marketing -m "Plan campaign variants" --policy strict --retries 2
+nanobot bots orchestrate --bot research-bot --bot writer-bot -m "Launch plan" --min-successful-bots 2 --fallback-bot research-bot
+nanobot bots team create "launch-squad" --tag marketing --tag strategy --max-bots 3
+nanobot bots team run launch-squad -m "Plan a product launch" --policy balanced --strategy best_match
+nanobot bots team delete launch-squad
+nanobot bots delete thread-marketing-bot --purge-files
+```
+
 ## 💻 CLI Reference
 
 | Command | Description |
@@ -1336,6 +1391,20 @@ nanobot gateway --config ~/.nanobot-telegram/config.json --workspace /tmp/nanobo
 | `nanobot agent -w <workspace>` | Chat against a specific workspace |
 | `nanobot agent -w <workspace> -c <config>` | Chat against a specific workspace/config |
 | `nanobot agent` | Interactive chat mode |
+| `nanobot bots create "<name>" --role "<role>"` | Create an isolated specialist bot workspace + config |
+| `nanobot bots list` | List registered bots for the current instance |
+| `nanobot bots show <bot-id>` | Show one bot's config, memory, and runtime summary |
+| `nanobot bots dashboard` | Generate a static HTML dashboard for the current bot registry |
+| `nanobot bots delete <bot-id>` | Delete a bot, with optional workspace/config cleanup |
+| `nanobot bots run <bot-id> -m "..."` | Run a registered bot directly against one message |
+| `nanobot bots compare <bot-a> <bot-b> -m "..."` | Run the same prompt across multiple bots and compare outputs |
+| `nanobot bots dispatch --tag <tag> -m "..."` | Select bots by metadata and fan out a team task |
+| `nanobot bots orchestrate --tag <tag> -m "..."` | Dispatch to a selected team and synthesize one final answer |
+| `nanobot bots team create "<name>" ...` | Save a reusable team definition from bot selectors |
+| `nanobot bots team list` | List saved bot teams |
+| `nanobot bots team show <team-id>` | Show a saved team definition and current members |
+| `nanobot bots team delete <team-id>` | Delete a saved team definition |
+| `nanobot bots team run <team-id> -m "..."` | Run a saved team and optionally synthesize one answer |
 | `nanobot agent --no-markdown` | Show plain-text replies |
 | `nanobot agent --logs` | Show runtime logs during chat |
 | `nanobot gateway` | Start the gateway |

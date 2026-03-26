@@ -1,6 +1,7 @@
 """Configuration loading utilities."""
 
 import json
+from contextvars import ContextVar
 from pathlib import Path
 
 import pydantic
@@ -8,20 +9,20 @@ from loguru import logger
 
 from nanobot.config.schema import Config
 
-# Global variable to store current config path (for multi-instance support)
-_current_config_path: Path | None = None
+# Task-local variable to store current config path (for multi-instance support)
+_current_config_path: ContextVar[Path | None] = ContextVar("nanobot_current_config_path", default=None)
 
 
 def set_config_path(path: Path) -> None:
     """Set the current config path (used to derive data directory)."""
-    global _current_config_path
-    _current_config_path = path
+    _current_config_path.set(path)
 
 
 def get_config_path() -> Path:
     """Get the configuration file path."""
-    if _current_config_path:
-        return _current_config_path
+    current = _current_config_path.get()
+    if current:
+        return current
     return Path.home() / ".nanobot" / "config.json"
 
 
