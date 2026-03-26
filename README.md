@@ -1330,8 +1330,6 @@ nanobot gateway --config ~/.nanobot-telegram/config.json --workspace /tmp/nanobo
 nanobot now supports a lightweight **bot team** workflow built on isolated bot workspaces.
 Each bot gets its own generated config, workspace, memory files, and custom skills directory.
 
-Roadmap: see [`docs/BOT_TEAMS_ROADMAP.md`](docs/BOT_TEAMS_ROADMAP.md).
-
 ### Create a specialist bot
 
 ```bash

@@ -9,17 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
-
 from nanobot.config.paths import get_runtime_subdir
 from nanobot.utils.helpers import ensure_dir
 
 _UNSET = object()
 
-
 def _default_registry() -> dict[str, Any]:
     """Return the default empty registry payload."""
     return {"version": 1, "bots": [], "teams": []}
-
 
 def _utcnow() -> str:
     """Return an ISO8601 UTC timestamp."""
