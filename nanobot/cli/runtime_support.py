@@ -205,6 +205,7 @@ async def run_bots_for_message_with(
     logs: bool = False,
     timeout_s: float | None = None,
     max_concurrency: int | None = None,
+    retries: int = 0,
 ) -> list[dict[str, Any]]:
     """Execute multiple bots in parallel while preserving input order and failures."""
 
@@ -225,29 +226,35 @@ async def run_bots_for_message_with(
             )
             return await asyncio.wait_for(coro, timeout=timeout_s) if timeout_s else await coro
 
-        try:
-            if semaphore:
-                async with semaphore:
+        for attempt in range(retries + 1):
+            try:
+                if semaphore:
+                    async with semaphore:
+                        response = await _execute()
+                else:
                     response = await _execute()
-            else:
-                response = await _execute()
-        except TimeoutError:
-            timeout_label = format(timeout_s or 0, "g")
-            return _bot_result(
-                bot,
-                session_id=resolved_session,
-                status="timeout",
-                error=f"Timed out after {timeout_label}s",
-                elapsed_ms=round((time.perf_counter() - started_at) * 1000),
-            )
-        except Exception as exc:  # noqa: BLE001 - keep fanout alive when one bot fails
-            return _bot_result(
-                bot,
-                session_id=resolved_session,
-                status="error",
-                error=str(exc) or exc.__class__.__name__,
-                elapsed_ms=round((time.perf_counter() - started_at) * 1000),
-            )
+                break
+            except TimeoutError:
+                if attempt < retries:
+                    continue
+                timeout_label = format(timeout_s or 0, "g")
+                return _bot_result(
+                    bot,
+                    session_id=resolved_session,
+                    status="timeout",
+                    error=f"Timed out after {timeout_label}s",
+                    elapsed_ms=round((time.perf_counter() - started_at) * 1000),
+                )
+            except Exception as exc:  # noqa: BLE001 - keep fanout alive when one bot fails
+                if attempt < retries:
+                    continue
+                return _bot_result(
+                    bot,
+                    session_id=resolved_session,
+                    status="error",
+                    error=str(exc) or exc.__class__.__name__,
+                    elapsed_ms=round((time.perf_counter() - started_at) * 1000),
+                )
         return _bot_result(
             bot,
             session_id=resolved_session,

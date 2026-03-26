@@ -19,6 +19,29 @@ LoadRuntimeConfig = Callable[..., Any]
 ResponseRenderable = Callable[[str, bool, dict | None], Any]
 PrintAgentResponse = Callable[[str, bool, dict | None], None]
 
+EXECUTION_POLICY_PRESETS: dict[str, dict[str, int | float | bool]] = {
+    "default": {},
+    "fast": {
+        "timeout": 20.0,
+        "max_concurrency": 8,
+        "retries": 0,
+    },
+    "balanced": {
+        "timeout": 45.0,
+        "max_concurrency": 4,
+        "min_successful_bots": 1,
+        "retries": 1,
+    },
+    "strict": {
+        "timeout": 60.0,
+        "max_concurrency": 3,
+        "min_successful_bots": 2,
+        "require_all_success": True,
+        "retries": 2,
+    },
+}
+SELECTION_STRATEGIES = {"all", "best_match", "top_k"}
+
 
 @dataclass(frozen=True)
 class BotCliContext:
@@ -33,6 +56,117 @@ class BotCliContext:
     print_agent_response: PrintAgentResponse
 
 
+def resolve_execution_policy(
+    ctx: BotCliContext,
+    *,
+    policy: str | None,
+    timeout: float | None,
+    max_concurrency: int | None,
+    retries: int,
+    min_successful_bots: int,
+    require_all_success: bool,
+) -> dict[str, float | int | bool]:
+    """Resolve orchestration runtime options from a named policy plus explicit flags."""
+    key = (policy or "default").strip().lower()
+    preset = EXECUTION_POLICY_PRESETS.get(key)
+    if preset is None:
+        choices = ", ".join(sorted(EXECUTION_POLICY_PRESETS.keys()))
+        ctx.console.print(f"[red]Unknown execution policy:[/red] {policy}. Choose one of: {choices}")
+        raise typer.Exit(1)
+
+    timeout_value = timeout if timeout is not None else preset.get("timeout")
+    max_concurrency_value = max_concurrency if max_concurrency is not None else preset.get("max_concurrency")
+    retries_value = retries if retries != 0 else int(preset.get("retries", 0))
+    min_successful_bots_value = (
+        min_successful_bots
+        if min_successful_bots != 1
+        else int(preset.get("min_successful_bots", min_successful_bots))
+    )
+    require_all_success_value = (
+        require_all_success
+        if require_all_success
+        else bool(preset.get("require_all_success", False))
+    )
+
+    return {
+        "policy": key,
+        "timeout": timeout_value,
+        "max_concurrency": max_concurrency_value,
+        "retries": retries_value,
+        "min_successful_bots": min_successful_bots_value,
+        "require_all_success": require_all_success_value,
+    }
+
+
+def apply_selection_strategy(
+    ctx: BotCliContext,
+    bots: list[dict[str, Any]],
+    *,
+    strategy: str | None,
+    message: str,
+    strategy_k: int | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Order selected bots according to the requested orchestration strategy."""
+    key = (strategy or "all").strip().lower()
+    if key not in SELECTION_STRATEGIES:
+        choices = ", ".join(sorted(SELECTION_STRATEGIES))
+        ctx.console.print(f"[red]Unknown selection strategy:[/red] {strategy}. Choose one of: {choices}")
+        raise typer.Exit(1)
+    if key == "all" or not bots:
+        if strategy_k is not None:
+            ctx.console.print("[red]--strategy-k can only be used with --strategy top_k.[/red]")
+            raise typer.Exit(1)
+        return bots, key
+
+    terms = [part for part in message.lower().split() if part]
+
+    def _score(bot: dict[str, Any]) -> int:
+        searchable = " ".join(
+            [
+                str(bot.get("name", "")),
+                str(bot.get("role", "")),
+                str(bot.get("description", "")),
+                " ".join(str(item) for item in (bot.get("tags") or [])),
+                " ".join(str(item) for item in (bot.get("skills") or [])),
+                " ".join(str(item) for item in (bot.get("custom_skills") or [])),
+            ]
+        ).lower()
+        return sum(1 for term in terms if term in searchable)
+
+    ordered = sorted(
+        enumerate(bots),
+        key=lambda pair: (_score(pair[1]), -pair[0]),
+        reverse=True,
+    )
+    ranked = [bot for _, bot in ordered]
+    if key == "top_k":
+        if strategy_k is None:
+            strategy_k = 1
+        if strategy_k < 1:
+            ctx.console.print("[red]--strategy-k must be >= 1.[/red]")
+            raise typer.Exit(1)
+        return ranked[:strategy_k], key
+
+    if strategy_k is not None:
+        ctx.console.print("[red]--strategy-k can only be used with --strategy top_k.[/red]")
+        raise typer.Exit(1)
+    return ranked, key
+
+
+def normalize_run_label(
+    ctx: BotCliContext,
+    run_label: str | None,
+) -> str | None:
+    """Normalize optional run labels and reject empty labels."""
+    if run_label is None:
+        return None
+    label = run_label.strip()
+    if not label:
+        ctx.console.print("[red]Invalid run label:[/red] provide a non-empty value.")
+        raise typer.Exit(1)
+    return label
+
+
 async def run_bot_fanout(
     ctx: BotCliContext,
     bots: list[dict[str, Any]],
@@ -42,6 +176,7 @@ async def run_bot_fanout(
     logs: bool = False,
     timeout_s: float | None = None,
     max_concurrency: int | None = None,
+    retries: int = 0,
 ) -> list[dict[str, Any]]:
     """Execute one message across a selected bot set."""
     return await ctx.run_bots_for_message(
@@ -51,6 +186,7 @@ async def run_bot_fanout(
         logs=logs,
         timeout_s=timeout_s,
         max_concurrency=max_concurrency,
+        retries=retries,
     )
 
 
@@ -63,10 +199,12 @@ async def run_bot_orchestration(
     logs: bool = False,
     timeout_s: float | None = None,
     max_concurrency: int | None = None,
+    retries: int = 0,
     synthesize: bool = True,
     min_successful_bots: int = 1,
+    fallback_bot_id: str | None = None,
     config: str | None = None,
-) -> tuple[list[dict[str, Any]], str, str | None]:
+) -> tuple[list[dict[str, Any]], str, str | None, str | None]:
     """Execute selected bots and optionally synthesize a final response."""
     results = await run_bot_fanout(
         ctx,
@@ -76,19 +214,41 @@ async def run_bot_orchestration(
         logs=logs,
         timeout_s=timeout_s,
         max_concurrency=max_concurrency,
+        retries=retries,
     )
     if not synthesize:
-        return results, "", None
+        return results, "", None, None
 
     successful = successful_bot_results(results)
     if len(successful) < min_successful_bots:
-        return results, "", (
-            f"Need at least {min_successful_bots} successful bot(s) before synthesis; got {len(successful)}."
+        reason = f"Need at least {min_successful_bots} successful bot(s) before synthesis; got {len(successful)}."
+        if not fallback_bot_id:
+            return results, "", reason, None
+
+        fallback_bot = next((bot for bot in bots if str(bot.get("id")) == fallback_bot_id), None)
+        if not fallback_bot:
+            return results, "", f"{reason} Fallback bot `{fallback_bot_id}` was not selected.", None
+
+        fallback_results = await run_bot_fanout(
+            ctx,
+            [fallback_bot],
+            message=message,
+            session_prefix=f"{session_prefix}:fallback",
+            logs=logs,
+            timeout_s=timeout_s,
+            max_concurrency=max_concurrency,
+            retries=retries,
         )
+        fallback = fallback_results[0]
+        combined = [*results, fallback]
+        if fallback.get("status") != "ok":
+            fallback_error = fallback.get("error") or "unknown fallback error"
+            return combined, "", f"{reason} Fallback bot `{fallback_bot_id}` failed: {fallback_error}", None
+        return combined, str(fallback.get("content") or ""), None, fallback_bot_id
 
     orchestrator_config = ctx.load_runtime_config(config=config, announce=False)
     synthesis = await ctx.synthesize_bot_results(orchestrator_config, message, successful)
-    return results, synthesis, None
+    return results, synthesis, None, None
 
 
 

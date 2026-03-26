@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
@@ -22,9 +25,12 @@ from nanobot.bots import (
 )
 from nanobot.cli.bot_cli_shared import (
     BotCliContext,
+    apply_selection_strategy,
     enforce_all_success,
     enforce_synthesis_quorum,
+    normalize_run_label,
     render_bot_results,
+    resolve_execution_policy,
     run_bot_fanout,
     run_bot_orchestration,
     summarize_bot_results,
@@ -245,6 +251,7 @@ def register_bot_commands(bots_app: typer.Typer, ctx: BotCliContext) -> None:
         logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during execution"),
         timeout: float | None = typer.Option(None, "--timeout", min=0.1, help="Per-bot timeout in seconds"),
         max_concurrency: int | None = typer.Option(None, "--max-concurrency", min=1, help="Maximum number of bot runs to execute concurrently"),
+        retries: int = typer.Option(0, "--retries", min=0, help="Retry failed/timeout bot runs this many times"),
         require_all_success: bool = typer.Option(False, "--require-all-success", help="Exit non-zero if any selected bot errors or times out"),
         output_json: str | None = typer.Option(None, "--output-json", help="Write structured JSON output to this file"),
     ):
@@ -263,6 +270,7 @@ def register_bot_commands(bots_app: typer.Typer, ctx: BotCliContext) -> None:
                 logs=logs,
                 timeout_s=timeout,
                 max_concurrency=max_concurrency,
+                retries=retries,
             )
         )
         summary = summarize_bot_results(results)
@@ -289,6 +297,7 @@ def register_bot_commands(bots_app: typer.Typer, ctx: BotCliContext) -> None:
         logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during execution"),
         timeout: float | None = typer.Option(None, "--timeout", min=0.1, help="Per-bot timeout in seconds"),
         max_concurrency: int | None = typer.Option(None, "--max-concurrency", min=1, help="Maximum number of bot runs to execute concurrently"),
+        retries: int = typer.Option(0, "--retries", min=0, help="Retry failed/timeout bot runs this many times"),
         require_all_success: bool = typer.Option(False, "--require-all-success", help="Exit non-zero if any selected bot errors or times out"),
         output_json: str | None = typer.Option(None, "--output-json", help="Write structured JSON output to this file"),
     ):
@@ -309,6 +318,7 @@ def register_bot_commands(bots_app: typer.Typer, ctx: BotCliContext) -> None:
                 logs=logs,
                 timeout_s=timeout,
                 max_concurrency=max_concurrency,
+                retries=retries,
             )
         )
         summary = summarize_bot_results(results)
@@ -341,44 +351,94 @@ def register_bot_commands(bots_app: typer.Typer, ctx: BotCliContext) -> None:
         logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during execution"),
         timeout: float | None = typer.Option(None, "--timeout", min=0.1, help="Per-bot timeout in seconds"),
         max_concurrency: int | None = typer.Option(None, "--max-concurrency", min=1, help="Maximum number of bot runs to execute concurrently"),
+        retries: int = typer.Option(0, "--retries", min=0, help="Retry failed/timeout bot runs this many times"),
         require_all_success: bool = typer.Option(False, "--require-all-success", help="Exit non-zero if any selected bot errors or times out"),
         min_successful_bots: int = typer.Option(1, "--min-successful-bots", min=1, help="Minimum successful bot runs required before synthesis"),
+        fallback_bot: str | None = typer.Option(None, "--fallback-bot", help="Bot id to run when synthesis quorum is not met"),
+        run_label: str | None = typer.Option(None, "--run-label", help="Optional operator label to tag this run"),
+        policy: str | None = typer.Option(None, "--policy", help="Execution policy preset: default, fast, balanced, strict"),
+        strategy: str | None = typer.Option(None, "--strategy", help="Bot selection strategy: all, best_match, top_k"),
+        strategy_k: int | None = typer.Option(None, "--strategy-k", min=1, help="When using --strategy top_k, keep only the top K ranked bots"),
         output_json: str | None = typer.Option(None, "--output-json", help="Write structured JSON output to this file"),
     ):
         """Dispatch to a selected team and optionally synthesize one final answer."""
         selected = select_bots(bot_ids=bot or [], tags=tag or [], skills=skill or [], query=query)
+        selected, selected_strategy = apply_selection_strategy(
+            ctx,
+            selected,
+            strategy=strategy,
+            message=message,
+            strategy_k=strategy_k,
+        )
         if max_bots is not None:
             selected = selected[:max_bots]
         if not selected:
             ctx.console.print("[red]No bots matched the provided selection criteria.[/red]")
             raise typer.Exit(1)
 
-        results, synthesis, synthesis_skipped_reason = asyncio.run(
+        options = resolve_execution_policy(
+            ctx,
+            policy=policy,
+            timeout=timeout,
+            max_concurrency=max_concurrency,
+            retries=retries,
+            min_successful_bots=min_successful_bots,
+            require_all_success=require_all_success,
+        )
+        resolved_run_label = normalize_run_label(ctx, run_label)
+        run_id = f"orchestrate:{uuid.uuid4().hex[:12]}"
+        started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        started_clock = time.perf_counter()
+        results, synthesis, synthesis_skipped_reason, synthesis_fallback_bot = asyncio.run(
             run_bot_orchestration(
                 ctx,
                 selected,
                 message=message,
                 session_prefix=session_prefix,
                 logs=logs,
-                timeout_s=timeout,
-                max_concurrency=max_concurrency,
+                timeout_s=options["timeout"],
+                max_concurrency=options["max_concurrency"],
+                retries=int(options["retries"]),
                 synthesize=synthesize,
-                min_successful_bots=min_successful_bots,
+                min_successful_bots=options["min_successful_bots"],
+                fallback_bot_id=fallback_bot,
                 config=config,
             )
         )
+        finished_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        duration_ms = round((time.perf_counter() - started_clock) * 1000)
         summary = summarize_bot_results(results)
         payload = {
+            "run_id": run_id,
+            "run_label": resolved_run_label,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "duration_ms": duration_ms,
             "selected_ids": [item["id"] for item in results],
+            "strategy": selected_strategy,
+            "execution": {
+                "policy": options["policy"],
+                "timeout": options["timeout"],
+                "max_concurrency": options["max_concurrency"],
+                "retries": options["retries"],
+                "min_successful_bots": options["min_successful_bots"],
+                "require_all_success": options["require_all_success"],
+            },
             "summary": summary,
             "synthesis": synthesis,
+            "synthesis_fallback_bot": synthesis_fallback_bot,
             "synthesis_skipped_reason": synthesis_skipped_reason,
             "results": results,
         }
         write_json_artifact(ctx, payload, output_json, announce=not as_json)
         if as_json:
             ctx.console.print_json(json.dumps(payload, ensure_ascii=False, indent=2))
-            enforce_all_success(ctx, summary, require_all_success=require_all_success, quiet=True)
+            enforce_all_success(
+                ctx,
+                summary,
+                require_all_success=bool(options["require_all_success"]),
+                quiet=True,
+            )
             enforce_synthesis_quorum(
                 ctx,
                 synthesis_skipped_reason=synthesis_skipped_reason,
@@ -401,5 +461,5 @@ def register_bot_commands(bots_app: typer.Typer, ctx: BotCliContext) -> None:
 
         if show_raw or not synthesis:
             render_bot_results(ctx, results, markdown)
-        enforce_all_success(ctx, summary, require_all_success=require_all_success)
+        enforce_all_success(ctx, summary, require_all_success=bool(options["require_all_success"]))
         enforce_synthesis_quorum(ctx, synthesis_skipped_reason=synthesis_skipped_reason)

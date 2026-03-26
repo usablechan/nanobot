@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+import uuid
+from datetime import datetime, timezone
 
 import typer
 from rich.table import Table
@@ -19,9 +22,12 @@ from nanobot.bots import (
 )
 from nanobot.cli.bot_cli_shared import (
     BotCliContext,
+    apply_selection_strategy,
     enforce_all_success,
     enforce_synthesis_quorum,
+    normalize_run_label,
     render_bot_results,
+    resolve_execution_policy,
     run_bot_orchestration,
     summarize_bot_results,
     write_json_artifact,
@@ -40,8 +46,18 @@ def register_team_commands(team_app: typer.Typer, ctx: BotCliContext) -> None:
         skill: list[str] | None = typer.Option(None, "--skill", help="Require associated/custom skill(s); repeat or use CSV"),
         query: str = typer.Option("", "--query", help="Substring match against id/name/role/description"),
         max_bots: int | None = typer.Option(None, "--max-bots", help="Limit how many matched bots to execute"),
+        execution_policy: str = typer.Option("default", "--execution-policy", help="Saved default execution policy: default, fast, balanced, strict"),
     ):
         """Create a reusable saved team definition."""
+        resolve_execution_policy(
+            ctx,
+            policy=execution_policy,
+            timeout=None,
+            max_concurrency=None,
+            retries=0,
+            min_successful_bots=1,
+            require_all_success=False,
+        )
         try:
             entry = create_team(
                 name=name,
@@ -51,6 +67,7 @@ def register_team_commands(team_app: typer.Typer, ctx: BotCliContext) -> None:
                 skills=skill or [],
                 query=query,
                 max_bots=max_bots,
+                execution_policy=execution_policy,
             )
         except ValueError as exc:
             ctx.console.print(f"[red]{exc}[/red]")
@@ -74,6 +91,7 @@ def register_team_commands(team_app: typer.Typer, ctx: BotCliContext) -> None:
         table.add_column("ID", style="cyan")
         table.add_column("Name", style="green")
         table.add_column("Selectors", style="magenta")
+        table.add_column("Policy", style="blue")
         table.add_column("Preview", style="yellow")
 
         for team in teams:
@@ -90,6 +108,7 @@ def register_team_commands(team_app: typer.Typer, ctx: BotCliContext) -> None:
                 str(team["id"]),
                 str(team["name"]),
                 " | ".join(selectors) or "none",
+                str(team.get("execution_policy") or "default"),
                 ", ".join(team.get("preview_bot_ids", [])) or "none",
             )
 
@@ -119,6 +138,7 @@ def register_team_commands(team_app: typer.Typer, ctx: BotCliContext) -> None:
         ctx.console.print(f"Skills: {', '.join(team.get('skills', [])) or 'none'}")
         ctx.console.print(f"Query: {team.get('query') or 'none'}")
         ctx.console.print(f"Max bots: {team.get('max_bots') if team.get('max_bots') is not None else 'none'}")
+        ctx.console.print(f"Execution policy: {team.get('execution_policy') or 'default'}")
         ctx.console.print(f"Resolved bots: {', '.join(bot['id'] for bot in resolved) or 'none'}")
 
     @team_app.command("delete")
@@ -144,11 +164,22 @@ def register_team_commands(team_app: typer.Typer, ctx: BotCliContext) -> None:
         query: str | None = typer.Option(None, "--query", help="Replace substring query; pass empty string to clear"),
         max_bots: int | None = typer.Option(None, "--max-bots", help="Replace max bot limit"),
         clear_max_bots: bool = typer.Option(False, "--clear-max-bots", help="Remove any saved max bot limit"),
+        execution_policy: str | None = typer.Option(None, "--execution-policy", help="Replace saved default execution policy"),
     ):
         """Update a saved team definition."""
         if clear_max_bots and max_bots is not None:
             ctx.console.print("[red]Choose either --max-bots or --clear-max-bots, not both.[/red]")
             raise typer.Exit(1)
+        if execution_policy is not None:
+            resolve_execution_policy(
+                ctx,
+                policy=execution_policy,
+                timeout=None,
+                max_concurrency=None,
+                retries=0,
+                min_successful_bots=1,
+                require_all_success=False,
+            )
 
         try:
             updated = update_team(
@@ -159,6 +190,7 @@ def register_team_commands(team_app: typer.Typer, ctx: BotCliContext) -> None:
                 skills=skill if skill is not None else _UNSET,
                 query=query if query is not None else _UNSET,
                 max_bots=None if clear_max_bots else (max_bots if max_bots is not None else _UNSET),
+                execution_policy=execution_policy if execution_policy is not None else _UNSET,
             )
         except ValueError as exc:
             ctx.console.print(f"[red]{exc}[/red]")
@@ -178,8 +210,14 @@ def register_team_commands(team_app: typer.Typer, ctx: BotCliContext) -> None:
         logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during execution"),
         timeout: float | None = typer.Option(None, "--timeout", min=0.1, help="Per-bot timeout in seconds"),
         max_concurrency: int | None = typer.Option(None, "--max-concurrency", min=1, help="Maximum number of bot runs to execute concurrently"),
+        retries: int = typer.Option(0, "--retries", min=0, help="Retry failed/timeout bot runs this many times"),
         require_all_success: bool = typer.Option(False, "--require-all-success", help="Exit non-zero if any selected bot errors or times out"),
         min_successful_bots: int = typer.Option(1, "--min-successful-bots", min=1, help="Minimum successful bot runs required before synthesis"),
+        fallback_bot: str | None = typer.Option(None, "--fallback-bot", help="Bot id to run when synthesis quorum is not met"),
+        run_label: str | None = typer.Option(None, "--run-label", help="Optional operator label to tag this run"),
+        policy: str | None = typer.Option(None, "--policy", help="Execution policy preset: default, fast, balanced, strict"),
+        strategy: str | None = typer.Option(None, "--strategy", help="Bot selection strategy: all, best_match, top_k"),
+        strategy_k: int | None = typer.Option(None, "--strategy-k", min=1, help="When using --strategy top_k, keep only the top K ranked bots"),
         output_json: str | None = typer.Option(None, "--output-json", help="Write structured JSON output to this file"),
     ):
         """Run one saved team definition."""
@@ -188,38 +226,82 @@ def register_team_commands(team_app: typer.Typer, ctx: BotCliContext) -> None:
             ctx.console.print(f"[red]Unknown team:[/red] {team_id}")
             raise typer.Exit(1)
         selected = resolve_team_bots(team)
+        selected, selected_strategy = apply_selection_strategy(
+            ctx,
+            selected,
+            strategy=strategy,
+            message=message,
+            strategy_k=strategy_k,
+        )
         if not selected:
             ctx.console.print("[red]This team currently resolves to zero bots.[/red]")
             raise typer.Exit(1)
 
-        results, synthesis, synthesis_skipped_reason = asyncio.run(
+        options = resolve_execution_policy(
+            ctx,
+            policy=policy or str(team.get("execution_policy") or "default"),
+            timeout=timeout,
+            max_concurrency=max_concurrency,
+            retries=retries,
+            min_successful_bots=min_successful_bots,
+            require_all_success=require_all_success,
+        )
+        resolved_run_label = normalize_run_label(ctx, run_label)
+        run_id = f"team:{team_id}:{uuid.uuid4().hex[:12]}"
+        started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        started_clock = time.perf_counter()
+        results, synthesis, synthesis_skipped_reason, synthesis_fallback_bot = asyncio.run(
             run_bot_orchestration(
                 ctx,
                 selected,
                 message=message,
                 session_prefix=f"cli:team:{team_id}",
                 logs=logs,
-                timeout_s=timeout,
-                max_concurrency=max_concurrency,
+                timeout_s=options["timeout"],
+                max_concurrency=options["max_concurrency"],
+                retries=int(options["retries"]),
                 synthesize=synthesize,
-                min_successful_bots=min_successful_bots,
+                min_successful_bots=options["min_successful_bots"],
+                fallback_bot_id=fallback_bot,
                 config=config,
             )
         )
+        finished_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        duration_ms = round((time.perf_counter() - started_clock) * 1000)
         summary = summarize_bot_results(results)
         payload = {
+            "run_id": run_id,
+            "run_label": resolved_run_label,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "duration_ms": duration_ms,
             "team_id": team_id,
             "team_name": team["name"],
             "selected_ids": [item["id"] for item in results],
+            "strategy": selected_strategy,
+            "execution": {
+                "policy": options["policy"],
+                "timeout": options["timeout"],
+                "max_concurrency": options["max_concurrency"],
+                "retries": options["retries"],
+                "min_successful_bots": options["min_successful_bots"],
+                "require_all_success": options["require_all_success"],
+            },
             "summary": summary,
             "synthesis": synthesis,
+            "synthesis_fallback_bot": synthesis_fallback_bot,
             "synthesis_skipped_reason": synthesis_skipped_reason,
             "results": results,
         }
         write_json_artifact(ctx, payload, output_json, announce=not as_json)
         if as_json:
             ctx.console.print_json(json.dumps(payload, ensure_ascii=False, indent=2))
-            enforce_all_success(ctx, summary, require_all_success=require_all_success, quiet=True)
+            enforce_all_success(
+                ctx,
+                summary,
+                require_all_success=bool(options["require_all_success"]),
+                quiet=True,
+            )
             enforce_synthesis_quorum(
                 ctx,
                 synthesis_skipped_reason=synthesis_skipped_reason,
@@ -243,5 +325,5 @@ def register_team_commands(team_app: typer.Typer, ctx: BotCliContext) -> None:
 
         if show_raw or not synthesis:
             render_bot_results(ctx, results, markdown)
-        enforce_all_success(ctx, summary, require_all_success=require_all_success)
+        enforce_all_success(ctx, summary, require_all_success=bool(options["require_all_success"]))
         enforce_synthesis_quorum(ctx, synthesis_skipped_reason=synthesis_skipped_reason)

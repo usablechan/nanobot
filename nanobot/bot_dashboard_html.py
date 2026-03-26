@@ -8,6 +8,23 @@ from typing import Any
 
 def render_dashboard_html(summaries: list[dict[str, Any]]) -> str:
     """Render the static HTML dashboard payload for bot summaries."""
+    max_sessions = max((int(bot.get("session_count", 0)) for bot in summaries), default=0)
+    session_chart_rows = []
+    for bot in summaries:
+        session_count = int(bot.get("session_count", 0))
+        width_pct = 0 if max_sessions == 0 else max(8, round((session_count / max_sessions) * 100))
+        session_chart_rows.append(
+            f"""
+            <li>
+              <span class="chart-label">{html.escape(bot['name'])}</span>
+              <div class="chart-track">
+                <div class="chart-fill" style="width: {width_pct}%"></div>
+              </div>
+              <span class="chart-value">{session_count}</span>
+            </li>
+            """
+        )
+
     cards = []
     for bot in summaries:
         tags_html = "".join(
@@ -117,6 +134,60 @@ def render_dashboard_html(summaries: list[dict[str, Any]]) -> str:
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
       gap: 18px;
+    }}
+    .viz {{
+      margin: 0 0 18px;
+      padding: 20px;
+      background: rgba(18, 25, 51, 0.92);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
+    }}
+    .viz h2 {{
+      margin: 0 0 6px;
+      font-size: 1.12rem;
+    }}
+    .viz p {{
+      margin: 0 0 14px;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }}
+    .chart-list {{
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: 10px;
+    }}
+    .chart-list li {{
+      display: grid;
+      grid-template-columns: minmax(120px, 220px) 1fr auto;
+      gap: 10px;
+      align-items: center;
+    }}
+    .chart-label {{
+      color: #dce4ff;
+      font-size: 0.9rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }}
+    .chart-track {{
+      height: 12px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.06);
+      overflow: hidden;
+    }}
+    .chart-fill {{
+      height: 100%;
+      background: linear-gradient(90deg, #6f86ff, #6be2ff);
+    }}
+    .chart-value {{
+      color: var(--muted);
+      font-size: 0.85rem;
+      min-width: 2ch;
+      text-align: right;
     }}
     .card {{
       padding: 20px;
@@ -231,6 +302,13 @@ def render_dashboard_html(summaries: list[dict[str, Any]]) -> str:
     </section>
   </header>
   <main>
+    <section class="viz">
+      <h2>Session Load (per bot)</h2>
+      <p>Simple static visualization of session counts to spot skew and idle specialists.</p>
+      <ul class="chart-list">
+        {''.join(session_chart_rows) if session_chart_rows else '<li><span class="chart-label">No bots yet</span><div class="chart-track"><div class="chart-fill" style="width: 0%"></div></div><span class="chart-value">0</span></li>'}
+      </ul>
+    </section>
     <section class="grid">
       {''.join(cards) if cards else '<article class="card"><h2>No bots yet</h2><p class="desc">Run `nanobot bots create ...` to scaffold your first specialist.</p></article>'}
     </section>

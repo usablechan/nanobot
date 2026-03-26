@@ -1368,8 +1368,12 @@ nanobot bots run thread-marketing-bot -m "Draft three launch threads"
 nanobot bots compare thread-marketing-bot research-bot -m "Plan a product launch"
 nanobot bots dispatch --tag marketing -m "Draft launch messaging"
 nanobot bots orchestrate --bot research-bot --bot thread-marketing-bot -m "Plan a launch campaign"
+nanobot bots orchestrate --tag marketing -m "Write launch thread copy" --strategy best_match --max-bots 1
+nanobot bots orchestrate --tag marketing -m "Plan campaign variants" --policy strict
+nanobot bots orchestrate --tag marketing -m "Plan campaign variants" --policy strict --retries 2
+nanobot bots orchestrate --bot research-bot --bot writer-bot -m "Launch plan" --min-successful-bots 2 --fallback-bot research-bot
 nanobot bots team create "launch-squad" --tag marketing --tag strategy --max-bots 3
-nanobot bots team run launch-squad -m "Plan a product launch"
+nanobot bots team run launch-squad -m "Plan a product launch" --policy balanced --strategy best_match
 nanobot bots team delete launch-squad
 nanobot bots delete thread-marketing-bot --purge-files
 ```

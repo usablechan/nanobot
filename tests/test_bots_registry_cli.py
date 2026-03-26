@@ -89,6 +89,7 @@ def test_bots_create_list_show_and_dashboard(tmp_path):
         html = dashboard_path.read_text(encoding="utf-8")
         assert "nanobot team dashboard" in html
         assert "Thread Marketing Bot" in html
+        assert "Session Load (per bot)" in html
 
 
 def test_bots_create_ensures_unique_ids(tmp_path):
@@ -106,6 +107,29 @@ def test_bots_create_ensures_unique_ids(tmp_path):
         data = json.loads(get_registry_path().read_text(encoding="utf-8"))
         ids = [bot["id"] for bot in data["bots"]]
         assert ids == ["research-bot", "research-bot-2"]
+
+
+def test_bots_commands_recover_from_corrupt_registry(tmp_path):
+    config_path = tmp_path / "instance" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("{}", encoding="utf-8")
+
+    with patched_config_paths(config_path):
+        registry_path = get_registry_path()
+        registry_path.parent.mkdir(parents=True, exist_ok=True)
+        registry_path.write_text("{not-valid-json", encoding="utf-8")
+
+        list_result = runner.invoke(app, ["bots", "list", "--json"])
+        assert list_result.exit_code == 0, list_result.stdout
+        assert json.loads(list_result.stdout) == []
+
+        create_result = runner.invoke(app, ["bots", "create", "Recovery Bot", "--role", "Support"])
+        assert create_result.exit_code == 0, create_result.stdout
+        created = json.loads(get_registry_path().read_text(encoding="utf-8"))
+        assert [bot["id"] for bot in created["bots"]] == ["recovery-bot"]
+        backups = sorted(registry_path.parent.glob("registry.corrupt-*.json"))
+        assert backups, "expected corrupt registry backup to be created"
+        assert "{not-valid-json" in backups[-1].read_text(encoding="utf-8")
 
 
 def test_bots_create_refuses_non_empty_workspace_without_force(tmp_path):
@@ -313,6 +337,15 @@ def test_team_update_preserves_unset_selectors_and_can_clear_fields(tmp_path):
         assert team["skills"] == ["summarize"]
         assert team["query"] == "research"
         assert team["max_bots"] == 2
+        assert team["execution_policy"] == "default"
+
+        update_policy = runner.invoke(
+            app,
+            ["bots", "team", "update", "research-team", "--execution-policy", "strict"],
+        )
+        assert update_policy.exit_code == 0, update_policy.stdout
+        policy_team = json.loads(runner.invoke(app, ["bots", "team", "show", "research-team", "--json"]).stdout)
+        assert policy_team["execution_policy"] == "strict"
 
         clear_fields = runner.invoke(
             app,
@@ -336,3 +369,33 @@ def test_team_update_preserves_unset_selectors_and_can_clear_fields(tmp_path):
         assert cleared_team["skills"] == ["summarize"]
         assert cleared_team["query"] == ""
         assert cleared_team["max_bots"] is None
+        assert cleared_team["execution_policy"] == "strict"
+
+
+def test_team_create_rejects_unknown_execution_policy(tmp_path):
+    config_path = tmp_path / "instance" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("{}", encoding="utf-8")
+
+    with patched_config_paths(config_path):
+        create_bot_result = runner.invoke(
+            app,
+            ["bots", "create", "Research Bot", "--role", "Research"],
+        )
+        assert create_bot_result.exit_code == 0, create_bot_result.stdout
+
+        invalid_team = runner.invoke(
+            app,
+            [
+                "bots",
+                "team",
+                "create",
+                "research-team",
+                "--bot",
+                "research-bot",
+                "--execution-policy",
+                "warp-speed",
+            ],
+        )
+        assert invalid_team.exit_code == 1
+        assert "Unknown execution policy" in invalid_team.stdout

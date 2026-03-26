@@ -33,6 +33,7 @@ def create_team(
     skills: list[str] | tuple[str, ...] | None = None,
     query: str = "",
     max_bots: int | None = None,
+    execution_policy: str = "default",
 ) -> dict[str, object]:
     """Create and persist a reusable saved team definition."""
     explicit_bot_ids = [bot_id for bot_id in list(bot_ids or []) if bot_id]
@@ -58,6 +59,7 @@ def create_team(
         "skills": skill_list,
         "query": query,
         "max_bots": max_bots,
+        "execution_policy": execution_policy,
         "created_at": _utcnow(),
         "updated_at": _utcnow(),
         "preview_bot_ids": [bot["id"] for bot in preview],
@@ -93,6 +95,7 @@ def update_team(
     skills: list[str] | tuple[str, ...] | None | object = _UNSET,
     query: str | None | object = _UNSET,
     max_bots: int | None | object = _UNSET,
+    execution_policy: str | None | object = _UNSET,
 ) -> dict[str, object]:
     """Update a saved team definition."""
     registry = load_registry()
@@ -110,6 +113,11 @@ def update_team(
         "skills": current.get("skills", []) if skills is _UNSET else _normalize_items(list(skills or [])),
         "query": current.get("query", "") if query is _UNSET else str(query or ""),
         "max_bots": current.get("max_bots") if max_bots is _UNSET else max_bots,
+        "execution_policy": (
+            current.get("execution_policy", "default")
+            if execution_policy is _UNSET
+            else str(execution_policy or "default")
+        ),
         "updated_at": _utcnow(),
     }
     next_team["preview_bot_ids"] = [bot["id"] for bot in resolve_team_bots(next_team)]

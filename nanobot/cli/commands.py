@@ -215,6 +215,7 @@ async def _run_bots_for_message(
     logs: bool = False,
     timeout_s: float | None = None,
     max_concurrency: int | None = None,
+    retries: int = 0,
 ) -> list[dict[str, Any]]:
     """Execute the same message across multiple registered bots."""
     return await _runtime_run_bots_for_message_with(
@@ -226,6 +227,7 @@ async def _run_bots_for_message(
         logs=logs,
         timeout_s=timeout_s,
         max_concurrency=max_concurrency,
+        retries=retries,
     )
 
 

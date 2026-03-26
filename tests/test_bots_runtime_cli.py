@@ -76,10 +76,21 @@ def test_bots_run_and_compare_use_registered_bot_configs(tmp_path):
 
             orchestrate_result = runner.invoke(
                 app,
-                ["bots", "orchestrate", "--bot", research_id, "--bot", writer_id, "--message", "launch", "--json"],
+                [
+                    "bots", "orchestrate", "--bot", research_id, "--bot", writer_id,
+                    "--message", "launch", "--json", "--run-label", "launch-v1",
+                ],
             )
             assert orchestrate_result.exit_code == 0, orchestrate_result.stdout
             orchestrated = json.loads(orchestrate_result.stdout)
+            assert orchestrated["run_id"].startswith("orchestrate:")
+            assert orchestrated["run_label"] == "launch-v1"
+            assert orchestrated["started_at"].endswith("+00:00")
+            assert orchestrated["finished_at"].endswith("+00:00")
+            assert isinstance(orchestrated["duration_ms"], int)
+            assert orchestrated["duration_ms"] >= 0
+            assert orchestrated["execution"]["policy"] == "default"
+            assert orchestrated["execution"]["retries"] == 0
             assert orchestrated["selected_ids"] == [research_id, writer_id]
             assert orchestrated["summary"] == {"total": 2, "ok": 2, "error": 0, "timeout": 0}
             assert orchestrated["synthesis"] == f"synth:launch:{research_id},{writer_id}"
@@ -98,10 +109,21 @@ def test_bots_run_and_compare_use_registered_bot_configs(tmp_path):
 
             team_run = runner.invoke(
                 app,
-                ["bots", "team", "run", "marketing-squad", "--message", "campaign", "--json"],
+                [
+                    "bots", "team", "run", "marketing-squad", "--message", "campaign",
+                    "--json", "--run-label", "campaign-v1",
+                ],
             )
             assert team_run.exit_code == 0, team_run.stdout
             team_payload = json.loads(team_run.stdout)
+            assert team_payload["run_id"].startswith("team:marketing-squad:")
+            assert team_payload["run_label"] == "campaign-v1"
+            assert team_payload["started_at"].endswith("+00:00")
+            assert team_payload["finished_at"].endswith("+00:00")
+            assert isinstance(team_payload["duration_ms"], int)
+            assert team_payload["duration_ms"] >= 0
+            assert team_payload["execution"]["policy"] == "default"
+            assert team_payload["execution"]["retries"] == 0
             assert team_payload["team_id"] == "marketing-squad"
             assert team_payload["selected_ids"] == [writer_id]
             assert team_payload["summary"] == {"total": 1, "ok": 1, "error": 0, "timeout": 0}
@@ -312,6 +334,312 @@ def test_require_all_success_returns_nonzero_for_partial_failures(tmp_path):
             assert payload["summary"] == {"total": 2, "ok": 1, "error": 1, "timeout": 0}
 
 
+def test_strict_policy_enforces_all_success_without_explicit_flag(tmp_path):
+    config_path = tmp_path / "instance" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("{}", encoding="utf-8")
+
+    with patched_config_paths(config_path):
+        first = runner.invoke(app, ["bots", "create", "Research Bot", "--role", "Research"])
+        second = runner.invoke(app, ["bots", "create", "Writer Bot", "--role", "Writing"])
+
+        assert first.exit_code == 0, first.stdout
+        assert second.exit_code == 0, second.stdout
+
+        registry = json.loads(get_registry_path().read_text(encoding="utf-8"))
+        research_id = registry["bots"][0]["id"]
+        writer_id = registry["bots"][1]["id"]
+
+        async def _fake_run_agent_once(config, message, session_id, *, logs=False):
+            workspace_name = Path(config.agents.defaults.workspace).name
+            if workspace_name == writer_id:
+                raise RuntimeError("writer bot offline")
+            return OutboundMessage(
+                channel="cli",
+                chat_id="direct",
+                content=f"{workspace_name}:{session_id}:{message}:{logs}",
+                metadata={"render_as": "text"},
+            )
+
+        with patch("nanobot.cli.commands._run_agent_once", side_effect=_fake_run_agent_once):
+            orchestrate_result = runner.invoke(
+                app,
+                [
+                    "bots", "orchestrate", "--bot", research_id, "--bot", writer_id,
+                    "--message", "launch", "--json", "--policy", "strict",
+                ],
+            )
+            assert orchestrate_result.exit_code == 1, orchestrate_result.stdout
+            orchestrated = json.loads(orchestrate_result.stdout)
+            assert orchestrated["execution"]["policy"] == "strict"
+            assert orchestrated["execution"]["retries"] == 2
+            assert orchestrated["summary"] == {"total": 2, "ok": 1, "error": 1, "timeout": 0}
+
+            team_create = runner.invoke(
+                app,
+                [
+                    "bots",
+                    "team",
+                    "create",
+                    "strict-policy-team",
+                    "--bot",
+                    research_id,
+                    "--bot",
+                    writer_id,
+                    "--execution-policy",
+                    "strict",
+                ],
+            )
+            assert team_create.exit_code == 0, team_create.stdout
+
+            team_run = runner.invoke(
+                app,
+                [
+                    "bots", "team", "run", "strict-policy-team", "--message", "campaign",
+                    "--json",
+                ],
+            )
+            assert team_run.exit_code == 1, team_run.stdout
+            payload = json.loads(team_run.stdout)
+            assert payload["execution"]["policy"] == "strict"
+            assert payload["summary"] == {"total": 2, "ok": 1, "error": 1, "timeout": 0}
+
+
+def test_unknown_policy_is_rejected(tmp_path):
+    config_path = tmp_path / "instance" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("{}", encoding="utf-8")
+
+    with patched_config_paths(config_path):
+        created = runner.invoke(app, ["bots", "create", "Research Bot", "--role", "Research"])
+        assert created.exit_code == 0, created.stdout
+
+        bot_id = json.loads(get_registry_path().read_text(encoding="utf-8"))["bots"][0]["id"]
+        result = runner.invoke(
+            app,
+            ["bots", "orchestrate", "--bot", bot_id, "--message", "launch", "--policy", "unknown-policy"],
+        )
+        assert result.exit_code == 1
+        assert "Unknown execution policy" in result.stdout
+
+
+def test_best_match_strategy_prioritizes_relevant_bot(tmp_path):
+    config_path = tmp_path / "instance" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("{}", encoding="utf-8")
+
+    with patched_config_paths(config_path):
+        first = runner.invoke(
+            app,
+            ["bots", "create", "Research Bot", "--role", "Research", "--tag", "content"],
+        )
+        second = runner.invoke(
+            app,
+            ["bots", "create", "Writer Bot", "--role", "Writing", "--tag", "content"],
+        )
+
+        assert first.exit_code == 0, first.stdout
+        assert second.exit_code == 0, second.stdout
+
+        registry = json.loads(get_registry_path().read_text(encoding="utf-8"))
+        research_id = registry["bots"][0]["id"]
+        writer_id = registry["bots"][1]["id"]
+
+        async def _fake_run_agent_once(config, message, session_id, *, logs=False):
+            workspace_name = Path(config.agents.defaults.workspace).name
+            return OutboundMessage(
+                channel="cli",
+                chat_id="direct",
+                content=f"{workspace_name}:{session_id}:{message}:{logs}",
+                metadata={"render_as": "text"},
+            )
+
+        async def _fake_synthesize(config, user_message, results):
+            return f"synth:{user_message}:{','.join(item['id'] for item in results)}"
+
+        with patch("nanobot.cli.commands._run_agent_once", side_effect=_fake_run_agent_once), \
+             patch("nanobot.cli.commands._synthesize_bot_results", side_effect=_fake_synthesize):
+            orchestrate_result = runner.invoke(
+                app,
+                [
+                    "bots", "orchestrate", "--tag", "content", "--message", "Need writing style options",
+                    "--strategy", "best_match", "--max-bots", "1", "--json",
+                ],
+            )
+            assert orchestrate_result.exit_code == 0, orchestrate_result.stdout
+            orchestrated = json.loads(orchestrate_result.stdout)
+            assert orchestrated["strategy"] == "best_match"
+            assert orchestrated["selected_ids"] == [writer_id]
+            assert research_id not in orchestrated["selected_ids"]
+
+
+def test_unknown_strategy_is_rejected(tmp_path):
+    config_path = tmp_path / "instance" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("{}", encoding="utf-8")
+
+    with patched_config_paths(config_path):
+        created = runner.invoke(app, ["bots", "create", "Research Bot", "--role", "Research"])
+        assert created.exit_code == 0, created.stdout
+
+        bot_id = json.loads(get_registry_path().read_text(encoding="utf-8"))["bots"][0]["id"]
+        result = runner.invoke(
+            app,
+            ["bots", "orchestrate", "--bot", bot_id, "--message", "launch", "--strategy", "unknown-strategy"],
+        )
+        assert result.exit_code == 1
+        assert "Unknown selection strategy" in result.stdout
+
+
+def test_top_k_strategy_and_strategy_k_validation(tmp_path):
+    config_path = tmp_path / "instance" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("{}", encoding="utf-8")
+
+    with patched_config_paths(config_path):
+        first = runner.invoke(
+            app,
+            ["bots", "create", "Research Bot", "--role", "Research", "--tag", "content"],
+        )
+        second = runner.invoke(
+            app,
+            ["bots", "create", "Writer Bot", "--role", "Writing", "--tag", "content"],
+        )
+        assert first.exit_code == 0, first.stdout
+        assert second.exit_code == 0, second.stdout
+
+        registry = json.loads(get_registry_path().read_text(encoding="utf-8"))
+        writer_id = registry["bots"][1]["id"]
+
+        async def _fake_run_agent_once(config, message, session_id, *, logs=False):
+            workspace_name = Path(config.agents.defaults.workspace).name
+            return OutboundMessage(
+                channel="cli",
+                chat_id="direct",
+                content=f"{workspace_name}:{session_id}:{message}:{logs}",
+                metadata={"render_as": "text"},
+            )
+
+        async def _fake_synthesize(config, user_message, results):
+            return f"synth:{user_message}:{','.join(item['id'] for item in results)}"
+
+        with patch("nanobot.cli.commands._run_agent_once", side_effect=_fake_run_agent_once), \
+             patch("nanobot.cli.commands._synthesize_bot_results", side_effect=_fake_synthesize):
+            top_k_result = runner.invoke(
+                app,
+                [
+                    "bots", "orchestrate", "--tag", "content", "--message", "Need writing style options",
+                    "--strategy", "top_k", "--strategy-k", "1", "--json",
+                ],
+            )
+            assert top_k_result.exit_code == 0, top_k_result.stdout
+            payload = json.loads(top_k_result.stdout)
+            assert payload["strategy"] == "top_k"
+            assert payload["selected_ids"] == [writer_id]
+
+            invalid_result = runner.invoke(
+                app,
+                [
+                    "bots", "orchestrate", "--tag", "content", "--message", "Need writing style options",
+                    "--strategy", "best_match", "--strategy-k", "1",
+                ],
+            )
+            assert invalid_result.exit_code == 1
+            assert "--strategy-k can only be used with --strategy top_k" in invalid_result.stdout
+
+
+def test_run_label_is_trimmed_and_empty_value_is_rejected(tmp_path):
+    config_path = tmp_path / "instance" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("{}", encoding="utf-8")
+
+    with patched_config_paths(config_path):
+        created = runner.invoke(app, ["bots", "create", "Research Bot", "--role", "Research"])
+        assert created.exit_code == 0, created.stdout
+        bot_id = json.loads(get_registry_path().read_text(encoding="utf-8"))["bots"][0]["id"]
+
+        async def _fake_run_agent_once(config, message, session_id, *, logs=False):
+            workspace_name = Path(config.agents.defaults.workspace).name
+            return OutboundMessage(
+                channel="cli",
+                chat_id="direct",
+                content=f"{workspace_name}:{session_id}:{message}:{logs}",
+                metadata={"render_as": "text"},
+            )
+
+        async def _fake_synthesize(config, user_message, results):
+            return f"synth:{user_message}:{','.join(item['id'] for item in results)}"
+
+        with patch("nanobot.cli.commands._run_agent_once", side_effect=_fake_run_agent_once), \
+             patch("nanobot.cli.commands._synthesize_bot_results", side_effect=_fake_synthesize):
+            ok_result = runner.invoke(
+                app,
+                [
+                    "bots", "orchestrate", "--bot", bot_id, "--message", "launch", "--json",
+                    "--run-label", "  nightly  ",
+                ],
+            )
+            assert ok_result.exit_code == 0, ok_result.stdout
+            payload = json.loads(ok_result.stdout)
+            assert payload["run_label"] == "nightly"
+
+            bad_result = runner.invoke(
+                app,
+                [
+                    "bots", "orchestrate", "--bot", bot_id, "--message", "launch", "--json",
+                    "--run-label", "   ",
+                ],
+            )
+            assert bad_result.exit_code == 1
+            assert "Invalid run label" in bad_result.stdout
+
+
+def test_strict_policy_retries_transient_failures(tmp_path):
+    config_path = tmp_path / "instance" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("{}", encoding="utf-8")
+
+    with patched_config_paths(config_path):
+        first = runner.invoke(app, ["bots", "create", "Research Bot", "--role", "Research"])
+        second = runner.invoke(app, ["bots", "create", "Writer Bot", "--role", "Writing"])
+        assert first.exit_code == 0, first.stdout
+        assert second.exit_code == 0, second.stdout
+
+        registry = json.loads(get_registry_path().read_text(encoding="utf-8"))
+        research_id = registry["bots"][0]["id"]
+        writer_id = registry["bots"][1]["id"]
+        attempts: dict[str, int] = {}
+
+        async def _flaky_run_agent_once(config, message, session_id, *, logs=False):
+            workspace_name = Path(config.agents.defaults.workspace).name
+            attempts[workspace_name] = attempts.get(workspace_name, 0) + 1
+            if workspace_name == writer_id and attempts[workspace_name] == 1:
+                raise RuntimeError("temporary writer failure")
+            return OutboundMessage(
+                channel="cli",
+                chat_id="direct",
+                content=f"{workspace_name}:{session_id}:{message}:{logs}",
+                metadata={"render_as": "text"},
+            )
+
+        async def _fake_synthesize(config, user_message, results):
+            return f"synth:{user_message}:{','.join(item['id'] for item in results)}"
+
+        with patch("nanobot.cli.commands._run_agent_once", side_effect=_flaky_run_agent_once), \
+             patch("nanobot.cli.commands._synthesize_bot_results", side_effect=_fake_synthesize):
+            result = runner.invoke(
+                app,
+                [
+                    "bots", "orchestrate", "--bot", research_id, "--bot", writer_id,
+                    "--message", "launch", "--json", "--policy", "strict",
+                ],
+            )
+            assert result.exit_code == 0, result.stdout
+            payload = json.loads(result.stdout)
+            assert payload["summary"] == {"total": 2, "ok": 2, "error": 0, "timeout": 0}
+            assert attempts[writer_id] == 2
+
+
 def test_max_concurrency_limits_parallel_bot_runs(tmp_path):
     config_path = tmp_path / "instance" / "config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -419,6 +747,49 @@ def test_min_successful_bots_blocks_synthesis_when_quorum_is_not_met(tmp_path):
             team_payload = json.loads(team_run.stdout)
             assert team_payload["synthesis"] == ""
             assert team_payload["synthesis_skipped_reason"] == "Need at least 2 successful bot(s) before synthesis; got 1."
+
+
+def test_fallback_bot_provides_synthesis_when_quorum_is_not_met(tmp_path):
+    config_path = tmp_path / "instance" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("{}", encoding="utf-8")
+
+    with patched_config_paths(config_path):
+        first = runner.invoke(app, ["bots", "create", "Research Bot", "--role", "Research"])
+        second = runner.invoke(app, ["bots", "create", "Writer Bot", "--role", "Writing"])
+
+        assert first.exit_code == 0, first.stdout
+        assert second.exit_code == 0, second.stdout
+
+        registry = json.loads(get_registry_path().read_text(encoding="utf-8"))
+        research_id = registry["bots"][0]["id"]
+        writer_id = registry["bots"][1]["id"]
+
+        async def _fake_run_agent_once(config, message, session_id, *, logs=False):
+            workspace_name = Path(config.agents.defaults.workspace).name
+            if workspace_name == writer_id:
+                raise RuntimeError("writer bot offline")
+            return OutboundMessage(
+                channel="cli",
+                chat_id="direct",
+                content=f"{workspace_name}:{session_id}:{message}:{logs}",
+                metadata={"render_as": "text"},
+            )
+
+        with patch("nanobot.cli.commands._run_agent_once", side_effect=_fake_run_agent_once):
+            orchestrate_result = runner.invoke(
+                app,
+                [
+                    "bots", "orchestrate", "--bot", research_id, "--bot", writer_id,
+                    "--message", "launch", "--json", "--min-successful-bots", "2",
+                    "--fallback-bot", research_id,
+                ],
+            )
+            assert orchestrate_result.exit_code == 0, orchestrate_result.stdout
+            payload = json.loads(orchestrate_result.stdout)
+            assert payload["synthesis_fallback_bot"] == research_id
+            assert payload["synthesis"].startswith(f"{research_id}:")
+            assert payload["synthesis_skipped_reason"] is None
 
 
 def test_multi_bot_commands_can_write_json_artifacts(tmp_path):
