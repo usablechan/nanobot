@@ -20,6 +20,10 @@ from nanobot.bots import (
     get_bot,
     list_bots,
     render_dashboard,
+<<<<<<< ours
+    serve_dashboard,
+=======
+>>>>>>> theirs
     select_bots,
     update_bot,
 )
@@ -151,8 +155,25 @@ def register_bot_commands(bots_app: typer.Typer, ctx: BotCliContext) -> None:
     @bots_app.command("dashboard")
     def bots_dashboard(
         output: str | None = typer.Option(None, "--output", "-o", help="Write dashboard HTML to this file"),
+<<<<<<< ours
+        serve: bool = typer.Option(False, "--serve", help="Run interactive web dashboard server"),
+        host: str = typer.Option("127.0.0.1", "--host", help="Host for --serve mode"),
+        port: int = typer.Option(8765, "--port", min=1, max=65535, help="Port for --serve mode"),
+    ):
+        """Generate static dashboard HTML or serve the interactive dashboard."""
+        if serve:
+            ctx.console.print(f"[green]Dashboard server:[/green] http://{host}:{port}")
+            ctx.console.print("[dim]Press Ctrl+C to stop.[/dim]")
+            try:
+                serve_dashboard(host=host, port=port)
+            except KeyboardInterrupt:
+                ctx.console.print("\n[dim]Dashboard server stopped.[/dim]")
+            return
+
+=======
     ):
         """Generate a static HTML dashboard for the current bot registry."""
+>>>>>>> theirs
         out = render_dashboard(Path(output).expanduser() if output else None)
         ctx.console.print(f"[green]Dashboard written:[/green] {out}")
 

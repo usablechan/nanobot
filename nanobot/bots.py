@@ -11,7 +11,11 @@ from nanobot.bot_core import (
     save_registry,
     slugify,
 )
+<<<<<<< ours
+from nanobot.bot_dashboard import bot_runtime_summary, render_dashboard, serve_dashboard
+=======
 from nanobot.bot_dashboard import bot_runtime_summary, render_dashboard
+>>>>>>> theirs
 from nanobot.bot_directory import get_bot, get_team, list_bots, list_teams, select_bots
 from nanobot.bot_team import create_team, delete_team, resolve_team_bots, update_team
 from nanobot.bot_workspace import create_bot, delete_bot, update_bot
@@ -38,6 +42,10 @@ __all__ = [
     "save_registry",
     "select_bots",
     "slugify",
+<<<<<<< ours
+    "serve_dashboard",
+=======
+>>>>>>> theirs
     "update_bot",
     "update_team",
 ]

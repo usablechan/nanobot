@@ -1330,6 +1330,11 @@ nanobot gateway --config ~/.nanobot-telegram/config.json --workspace /tmp/nanobo
 nanobot now supports a lightweight **bot team** workflow built on isolated bot workspaces.
 Each bot gets its own generated config, workspace, memory files, and custom skills directory.
 
+<<<<<<< ours
+=======
+Roadmap: see [`docs/BOT_TEAMS_ROADMAP.md`](docs/BOT_TEAMS_ROADMAP.md).
+
+>>>>>>> theirs
 ### Create a specialist bot
 
 ```bash
@@ -1356,10 +1361,18 @@ This creates:
 nanobot bots list
 nanobot bots show thread-marketing-bot
 nanobot bots dashboard
+<<<<<<< ours
+nanobot bots dashboard --serve --host 127.0.0.1 --port 8765
+=======
+>>>>>>> theirs
 ```
 
 The generated dashboard is a static HTML file summarizing each bot's role, workspace, memory snapshot,
 custom skills, and session counts.
+<<<<<<< ours
+With `--serve`, nanobot starts an interactive local web dashboard for creating, editing, deleting, and running bots/teams.
+=======
+>>>>>>> theirs
 
 ### Run bots directly
 

@@ -89,6 +89,10 @@ def resolve_team_bots(team: dict[str, object]) -> list[dict[str, object]]:
 def update_team(
     team_id: str,
     *,
+<<<<<<< ours
+    name: str | None = None,
+=======
+>>>>>>> theirs
     description: str | None = None,
     bot_ids: list[str] | tuple[str, ...] | None | object = _UNSET,
     tags: list[str] | tuple[str, ...] | None | object = _UNSET,
@@ -107,6 +111,10 @@ def update_team(
     current = dict(teams[index])
     next_team = {
         **current,
+<<<<<<< ours
+        "name": name if name is not None else current.get("name", ""),
+=======
+>>>>>>> theirs
         "description": description if description is not None else current.get("description", ""),
         "bot_ids": current.get("bot_ids", []) if bot_ids is _UNSET else [item for item in list(bot_ids or []) if item],
         "tags": current.get("tags", []) if tags is _UNSET else _normalize_items(list(tags or [])),

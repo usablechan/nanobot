@@ -22,6 +22,13 @@ from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
+from nanobot.agent.tools.runtime import (
+    RelayToBotTool,
+    RuntimeLinksTool,
+    TeamMemoryTool,
+    RuntimeWorkersTool,
+    TerminalTaskTool,
+)
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
@@ -125,15 +132,22 @@ class AgentLoop:
         self.tools.register(ReadFileTool(workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read))
         for cls in (WriteFileTool, EditFileTool, ListDirTool):
             self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
+        exec_tool: ExecTool | None = None
         if self.exec_config.enable:
-            self.tools.register(ExecTool(
+            exec_tool = ExecTool(
                 working_dir=str(self.workspace),
                 timeout=self.exec_config.timeout,
                 restrict_to_workspace=self.restrict_to_workspace,
                 path_append=self.exec_config.path_append,
-            ))
+            )
+            self.tools.register(exec_tool)
+            self.tools.register(TerminalTaskTool(exec_tool))
         self.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
+        self.tools.register(RuntimeWorkersTool())
+        self.tools.register(RuntimeLinksTool())
+        self.tools.register(RelayToBotTool())
+        self.tools.register(TeamMemoryTool())
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:

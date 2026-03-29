@@ -54,7 +54,21 @@ def render_dashboard(output: Path | None = None) -> Path:
     return out
 
 
+<<<<<<< ours
+def serve_dashboard(host: str = "127.0.0.1", port: int = 8765) -> None:
+    """Serve an interactive bot dashboard with CRUD APIs."""
+    from nanobot.bot_dashboard_web import serve_dashboard_web
+
+    serve_dashboard_web(host=host, port=port)
+
+
 __all__ = [
     "bot_runtime_summary",
     "render_dashboard",
+    "serve_dashboard",
+=======
+__all__ = [
+    "bot_runtime_summary",
+    "render_dashboard",
+>>>>>>> theirs
 ]
